@@ -1,3 +1,11 @@
+##########################################################################################################################################################
+# This feature extraction code is constructed from snippets of the https://github.com/delton137/Machine-Learning-Energetic-Molecules-Notebooks repository#
+# I do not own any part of this code however I have made changes to make it faster to reproduce the results                                              #
+##########################################################################################################################################################
+
+
+
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,14 +29,20 @@ from sklearn.model_selection import RandomizedSearchCV as CV
 
 def make_score_dict(x,y,krr):
 
-    score_dict = {}
+    
 
     clf = krr.fit(x,y)
-    clf_best = clf.best_estimator_
-    print (pd.DataFrame.from_dict(clf.cv_results_).columns)
+    
+
+    keys = ['mean_test_MAE', 'mean_train_MAE', 'std_test_MAE','mean_test_r2', 'mean_train_r2', 'std_test_r2','mean_test_p', 'mean_train_p', 'std_test_p']
+    return ({x:np.mean(clf.cv_results_[x]) for x in keys})
 
 def pearson(y_true,y_pred):
     return (np.corrcoef(y_true, y_pred)[0, 1])
+
+
+def mean_absolute_percentage_error(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / (y_true))) * 100
 
 
 def all_test_everything(data, featurization_dict, targets, inner_cv=KFold(n_splits=2,shuffle=True),
@@ -55,8 +69,8 @@ def all_test_everything(data, featurization_dict, targets, inner_cv=KFold(n_spli
     results={}
     best={}
 
-    num_targets = len(targets)
-    scorers_dict = get_scorers_dict()
+    #num_targets = len(targets)
+    
 
     for target in targets:
         if (verbose): print("running target %s" % target)
@@ -76,7 +90,8 @@ def all_test_everything(data, featurization_dict, targets, inner_cv=KFold(n_spli
 
             if (x.ndim == 1):
                 x = x.reshape(-1,1)
-
+            
+            print (x)
             if (normalize):
                 st = StandardScaler()
                 x = st.fit_transform(x)
@@ -95,14 +110,15 @@ def all_test_everything(data, featurization_dict, targets, inner_cv=KFold(n_spli
                 #                                     outer_cv=outer_cv, verbose=verbose)
                 # print ("Stuck")
 
-                scoring = {'MAE':'neg_mean_absolute_error', 'r-squared':'r2','pearson':make_scorer(pearson)}
-                krr = CV(KernelRidge(kernel='rbf'), param_distributions=param_grid, cv=5, scoring=scoring, n_iter=10, n_jobs=-1, refit='MAE', return_train_score=True)
+                scoring = {'MAE':'neg_mean_absolute_error', 'r2':'r2','p':make_scorer(pearson),'MAPE':make_scorer(mean_absolute_percentage_error)}
+                krr = CV(KernelRidge(kernel='rbf'), param_distributions=param_grid, cv=20, scoring=scoring, n_iter=5, n_jobs=-1, refit='MAE', return_train_score=True)
                 
-                modelresults[modelname] = make_score_dict(x,y,krr)
+                scores_dict = make_score_dict(x,y,krr)
+                modelresults[modelname] = scores_dict['mean_test_MAE']
 
-                if (scores_dict['MAE'] < best_value):
+                if (scores_dict['mean_test_MAE'] < best_value):
                     best[target]=[featurization, modelname]
-                    best_value = scores_dict["MAE"]
+                    best_value = scores_dict["mean_test_MAE"]
 
             featurizationresults[featurization] = modelresults
         
@@ -196,7 +212,7 @@ if __name__ == "__main__":
 
     X_Estate_combined = np.concatenate((X_Estate, X_combined), axis=1)
     X_Estate_combined_Cmat_eigs = np.concatenate((X_Estate_combined, X_Cmat_eigs), axis=1)
-    X_Estate_combined_lit_BoB = Estate_CDS_LBoB_featurizer(list(data['Mols']))
+    X_Estate_combined_lit_BoB = Estate_CDS_LBoB_featurizer(list(data['Mols']))[1]
     X_CustDesrip_lit_BoB = np.concatenate(( X_combined, X_LBoB), axis=1)
 
 
