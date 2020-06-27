@@ -1,13 +1,13 @@
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import KFold, ShuffleSplit
 from sklearn.kernel_ridge import KernelRidge
+from sklearn.metrics import make_scorer
 from sklearn.linear_model import Ridge, Lasso, LinearRegression, BayesianRidge
 import warnings
-warnings.filterwarnings("ignore")
+# warnings.filterwarnings("ignore")
 from mmltoolkit.CV_tools import *
 from mmltoolkit.featurizations import * 
 from mmltoolkit.fingerprints import * 
@@ -16,130 +16,225 @@ from mmltoolkit.test_everything import *
 from sklearn.model_selection import ShuffleSplit 
 from mmltoolkit.descriptors import *
 from mmltoolkit.featurizations import *
+from sklearn.model_selection import RandomizedSearchCV as CV
 
 
+def make_score_dict(x,y,krr):
+
+    score_dict = {}
+
+    clf = krr.fit(x,y)
+    clf_best = clf.best_estimator_
+    print (pd.DataFrame.from_dict(clf.cv_results_).columns)
+
+def pearson(y_true,y_pred):
+    return (np.corrcoef(y_true, y_pred)[0, 1])
 
 
-#Read the data
-data = pd.read_excel('data/Huang_Massa_data_with_all_SMILES.xlsx', skipfooter=1)
+def all_test_everything(data, featurization_dict, targets, inner_cv=KFold(n_splits=2,shuffle=True),
+                    outer_cv=ShuffleSplit(n_splits=1, test_size=0.2), verbose=False, normalize=False ):
+    '''
+        test all combinations of target variable, featurizations, and models
+        by performing a gridsearch CV hyperparameter
+        optimization for each combination and then CV scoring the best model.
+        required args:
+            data : a pandas dataframe with data for the different targets in the columns
+            featurization_dict : a dictionary of the form {"featurization name" : X_featurization }, where X_featurization is the data array
+            targets : a list of target names, corresponding to the columns in data
+        important optional args:
+            outer_cv : crossvalidation object specifying cross validation strategy for the outer
+                     train-test CV loop. Typically we choose ShuffleSplit with a large # of splits.
+            inner_cv : crossvalidation object specifying cross validation strategy for the inner train-validation
+                     CV loop. K-fold with 5 folds is the standard.
+        returns:
+            results : a nested dictionary of the form
+                     {target: { featurization_name: {model_name: scores_dict{ 'MAE': value, 'r2':value, etc }}}}
+            best : a dictionary of the form {target : [best_featurization_name, best_model_name]}
+    '''
 
-target_prop = 'Explosive energy (kj/cc)'
+    results={}
+    best={}
 
-#Add some new columns
-data['Mols'] = data['SMILES'].apply(Chem.MolFromSmiles)
+    num_targets = len(targets)
+    scorers_dict = get_scorers_dict()
 
+    for target in targets:
+        if (verbose): print("running target %s" % target)
 
-#important - add hydrogens!!
-data['Mols'] = data['Mols'].apply(Chem.AddHs)
+        y = np.array(data[target].values)
 
+        featurizationresults = {}
 
-X_Estate = truncated_Estate_featurizer(list(data['Mols']))
+        best_value = 1000000000000
 
+        for featurization in featurization_dict.keys():
+            if (verbose): print("    testing featurization %s" % featurization)
 
-num_mols = len(data)
+            x = featurization_dict[featurization]
 
-targets = [
- 'Density (g/cm3)',
- 'Delta Hf solid (kj/mol)',
- 'Explosive energy (kj/cc)',
- 'Shock velocity (km/s)',
- 'Particle velocity (km/s)',
- 'Speed of sound (km/s)',
- 'Pressure (Gpa)',
- 'T(K)',
- 'TNT Equiv (per cc)'
-  ]
+            x = np.array(x)
 
+            if (x.ndim == 1):
+                x = x.reshape(-1,1)
 
+            if (normalize):
+                st = StandardScaler()
+                x = st.fit_transform(x)
 
-bond_types, X_LBoB = literal_bag_of_bonds(list(data['Mols'])) 
+            model_dict = make_models()
 
-num_atoms = []
-for mol in data['Mols']:
-    mol = Chem.AddHs(mol)
-    num_atoms += [mol.GetNumAtoms()]
+            modelresults = {}
+
+            for modelname in model_dict.keys():
+
+                model = model_dict[modelname]['model']
+                param_grid = model_dict[modelname]['param_grid']
+
+                # scores_dict = nested_grid_search_CV(x, y, model, param_grid,
+                #                                     inner_cv=KFold(n_splits=2, shuffle=True),
+                #                                     outer_cv=outer_cv, verbose=verbose)
+                # print ("Stuck")
+
+                scoring = {'MAE':'neg_mean_absolute_error', 'r-squared':'r2','pearson':make_scorer(pearson)}
+                krr = CV(KernelRidge(kernel='rbf'), param_distributions=param_grid, cv=5, scoring=scoring, n_iter=10, n_jobs=-1, refit='MAE', return_train_score=True)
+                
+                modelresults[modelname] = make_score_dict(x,y,krr)
+
+                if (scores_dict['MAE'] < best_value):
+                    best[target]=[featurization, modelname]
+                    best_value = scores_dict["MAE"]
+
+            featurizationresults[featurization] = modelresults
+        
+        results[target] = featurizationresults
+
+    return (dict(results), dict(best))
+
+if __name__ == "__main__":
+
     
-max_atoms = int(max(num_atoms))
+    #Read the data
+    data = pd.read_excel('data/Huang_Massa_data_with_all_SMILES.xlsx', skipfooter=1)
 
-X_Cmat_as_vec = np.zeros((num_mols, (max_atoms**2-max_atoms)//2 + max_atoms))
-X_Cmat_eigs = np.zeros((num_mols, max_atoms))
-X_Cmat_unsorted_eigs = np.zeros((num_mols, max_atoms))
+    target_prop = 'Explosive energy (kj/cc)'
 
-X_summedBoB = []
-filename_list = []
+    #Add some new columns
+    data['Mols'] = data['SMILES'].apply(Chem.MolFromSmiles)
 
-for i, refcode in enumerate(data['Molecular Name']):
-    filename = 'data/HM_all_xyz_files/'+refcode+'.xyz'
-    this_Cmat_eigs, this_Cmat_as_vec = coulombmat_and_eigenvalues_as_vec(filename, max_atoms )
-    this_Cmat_unsorted_eigs, this_Cmat_as_vec = coulombmat_and_eigenvalues_as_vec(filename, max_atoms, sort=False)
 
-    summed_BoB_feature_names, summedBoB = summed_bag_of_bonds(filename)
-    X_summedBoB += [summedBoB]
+    #important - add hydrogens!!
+    data['Mols'] = data['Mols'].apply(Chem.AddHs)
 
-    filename_list += [filename]
+
+    X_Estate = truncated_Estate_featurizer(list(data['Mols']))
+
+
+    num_mols = len(data)
+
+    targets = [
+    'Density (g/cm3)',
+    'Delta Hf solid (kj/mol)',
+    'Explosive energy (kj/cc)',
+    'Shock velocity (km/s)',
+    'Particle velocity (km/s)',
+    'Speed of sound (km/s)',
+    'Pressure (Gpa)',
+    'T(K)',
+    'TNT Equiv (per cc)'
+    ]
+
+
+
+    bond_types, X_LBoB = literal_bag_of_bonds(list(data['Mols'])) 
+
+    num_atoms = []
+    for mol in data['Mols']:
+        mol = Chem.AddHs(mol)
+        num_atoms += [mol.GetNumAtoms()]
+        
+    max_atoms = int(max(num_atoms))
+
+    X_Cmat_as_vec = np.zeros((num_mols, (max_atoms**2-max_atoms)//2 + max_atoms))
+    X_Cmat_eigs = np.zeros((num_mols, max_atoms))
+    X_Cmat_unsorted_eigs = np.zeros((num_mols, max_atoms))
+
+    X_summedBoB = []
+    filename_list = []
+
+    for i, refcode in enumerate(data['Molecular Name']):
+        filename = 'data/HM_all_xyz_files/'+refcode+'.xyz'
+        this_Cmat_eigs, this_Cmat_as_vec = coulombmat_and_eigenvalues_as_vec(filename, max_atoms )
+        this_Cmat_unsorted_eigs, this_Cmat_as_vec = coulombmat_and_eigenvalues_as_vec(filename, max_atoms, sort=False)
+
+        summed_BoB_feature_names, summedBoB = summed_bag_of_bonds(filename)
+        X_summedBoB += [summedBoB]
+
+        filename_list += [filename]
+        
+        X_Cmat_eigs[i,:] = this_Cmat_eigs
+        X_Cmat_unsorted_eigs[i,:] = this_Cmat_eigs
+        X_Cmat_as_vec[i,:] = this_Cmat_as_vec
+
+    X_summedBoB = np.array(X_summedBoB)
+
+    BoB_feature_list, X_BoB = bag_of_bonds(filename_list, verbose=False)
+
+
+    data['Oxygen Balance_100'] = data['Mols'].apply(oxygen_balance_100)
+    data['Oxygen Balance_1600'] = data['Mols'].apply(oxygen_balance_1600)
+
+    data['modified OB'] = data['Mols'].apply(modified_oxy_balance)
+    data['OB atom counts'] = data['Mols'].apply(return_atom_nums_modified_OB)
+    data['combined_nums'] =  data['Mols'].apply(return_combined_nums)
+
+
+    X_OB100 = np.array(list(data['Oxygen Balance_100'])).reshape(-1,1)     
+    X_OB1600 = np.array(list(data['Oxygen Balance_1600'])).reshape(-1,1)     
+    X_OBmod = np.array(list(data['modified OB'])).reshape(-1,1)   
+    X_OB_atom_counts = np.array(list(data['OB atom counts']))
+    X_combined = np.array(list(data['combined_nums']))
+
+    X_Estate_combined = np.concatenate((X_Estate, X_combined), axis=1)
+    X_Estate_combined_Cmat_eigs = np.concatenate((X_Estate_combined, X_Cmat_eigs), axis=1)
+    X_Estate_combined_lit_BoB = Estate_CDS_LBoB_featurizer(list(data['Mols']))
+    X_CustDesrip_lit_BoB = np.concatenate(( X_combined, X_LBoB), axis=1)
+
+
+    featurization_dict = {
+                    "Estate": X_Estate,
+                    "Oxygen balance$_{100}$": X_OB100, 
+                    "Oxygen balance$_{1600}$": X_OB1600, 
+                    "Oxygen balance atom counts": X_OB_atom_counts,
+                    "CDS": X_combined,
+                    "SoB" : X_LBoB,
+                    'Estate+CDS':   X_Estate_combined,
+                    "Coulomb matrices as vec" :   X_Cmat_as_vec,
+                    "CM eigs": X_Cmat_eigs,
+                    "Bag of Bonds": X_BoB,
+                    "Summed Bag of Bonds (sBoB)": X_summedBoB, 
+                    "\\footnotesize{Estate+CDS+SoB}":X_Estate_combined_lit_BoB,
+                    "C.D.S + LBoB": X_CustDesrip_lit_BoB,
+                    "LBoB + OB100": np.concatenate(( X_LBoB, X_OB100), axis=1)
+                    }
+
+    targets = [
+    #'Density (g/cm3)',
+    #'Delta Hf solid (kj/mol)',
+    'Explosive energy (kj/cc)',
+    #'Shock velocity (km/s)',
+    #'Particle velocity (km/s)',
+    #'Speed of sound (km/s)',
+    #'Pressure (Gpa)',
+    #'T(K)',
+    #'TNT Equiv (per cc)'
+    ]
+
     
-    X_Cmat_eigs[i,:] = this_Cmat_eigs
-    X_Cmat_unsorted_eigs[i,:] = this_Cmat_eigs
-    X_Cmat_as_vec[i,:] = this_Cmat_as_vec
-
-X_summedBoB = np.array(X_summedBoB)
-
-BoB_feature_list, X_BoB = bag_of_bonds(filename_list, verbose=False)
-
-
-data['Oxygen Balance_100'] = data['Mols'].apply(oxygen_balance_100)
-data['Oxygen Balance_1600'] = data['Mols'].apply(oxygen_balance_1600)
-
-data['modified OB'] = data['Mols'].apply(modified_oxy_balance)
-data['OB atom counts'] = data['Mols'].apply(return_atom_nums_modified_OB)
-data['combined_nums'] =  data['Mols'].apply(return_combined_nums)
-
-
-X_OB100 = np.array(list(data['Oxygen Balance_100'])).reshape(-1,1)     
-X_OB1600 = np.array(list(data['Oxygen Balance_1600'])).reshape(-1,1)     
-X_OBmod = np.array(list(data['modified OB'])).reshape(-1,1)   
-X_OB_atom_counts = np.array(list(data['OB atom counts']))
-X_combined = np.array(list(data['combined_nums']))
-
-X_Estate_combined = np.concatenate((X_Estate, X_combined), axis=1)
-X_Estate_combined_Cmat_eigs = np.concatenate((X_Estate_combined, X_Cmat_eigs), axis=1)
-X_Estate_combined_lit_BoB = Estate_CDS_LBoB_featurizer(list(data['Mols']))
-X_CustDesrip_lit_BoB = np.concatenate(( X_combined, X_LBoB), axis=1)
-
-
-featurization_dict = {
-                 "Estate": X_Estate,
-                 "Oxygen balance$_{100}$": X_OB100, 
-                 "Oxygen balance$_{1600}$": X_OB1600, 
-                 "Oxygen balance atom counts": X_OB_atom_counts,
-                 "CDS": X_combined,
-                 "SoB" : X_LBoB,
-                 'Estate+CDS':   X_Estate_combined,
-                 "Coulomb matrices as vec" :   X_Cmat_as_vec,
-                 "CM eigs": X_Cmat_eigs,
-                 "Bag of Bonds": X_BoB,
-                 "Summed Bag of Bonds (sBoB)": X_summedBoB, 
-                 "\\footnotesize{Estate+CDS+SoB}":X_Estate_combined_lit_BoB,
-                 "C.D.S + LBoB": X_CustDesrip_lit_BoB,
-                 "LBoB + OB100": np.concatenate(( X_LBoB, X_OB100), axis=1)
-                }
-
-targets = [
- #'Density (g/cm3)',
- #'Delta Hf solid (kj/mol)',
- 'Explosive energy (kj/cc)',
- #'Shock velocity (km/s)',
- #'Particle velocity (km/s)',
- #'Speed of sound (km/s)',
- #'Pressure (Gpa)',
- #'T(K)',
- #'TNT Equiv (per cc)'
-  ]
-
-
-(results, best) = test_everything(data, featurization_dict, targets, verbose=True, normalize=True )
+    (results, best) = all_test_everything(data, featurization_dict, targets, verbose=True, normalize=True )
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore',r'LinAlgWarning')
 
 
 
-pickle.dump( results, open( "data/test_all_results3.pkl", "wb" ) )
-pickle.dump( best, open( "data/test_all_best3.pkl", "wb" ) )
+    pickle.dump( results, open( "data/test_all_results3.pkl", "wb" ) )
+    pickle.dump( best, open( "data/test_all_best3.pkl", "wb" ) )
