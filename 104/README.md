@@ -1,0 +1,3 @@
+The data and code provided belongs to the authors of the paper "Applying machine learning techniques to predict the properties of energetic materials". We do not own or claim ownership for any of the work done apart from reproducing their results. The comeplete rights to the data and some of the code belong to the authors and can be modified or removed only upon their request.
+
+Authors: Daniel C. Elton , Zois Boukouvalas, Mark S. Butrico, Mark D. Fuge & Peter W. Chung
